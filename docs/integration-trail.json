@@ -1,0 +1,79 @@
+{
+  "id": "freestyle-integration-overview-informative",
+  "title": "Using Freestyle VM to Create Trails From Mobile App",
+  "summary": "**What we pay for.** Freestyle hosts the Git repo and runs a sandboxed VM that clones it in-network; the **VM is the metered cost** — vCPU, memory, and storage billed by the hour — while each imported repo only counts against the plan's repo cap (Free 500 / Hobby 5,000 / Pro 50,000), not a per-repo charge.\n\n**The security boundary.** The user's GitHub token stays on the host and authenticates only the import; the VM gets a separate scoped, read-only token and talks only to `git.freestyle.sh`, never github.com.\n\n**Teardown stops the meter.** The host deletes the VM, identity, and repo after publishing — the VM's hourly meter stops and the repo slot frees, so nothing rented outlives the session.\n\n```mermaid\nflowchart LR\n  subgraph GitHub\n    ghrepo[(user repo)]\n  end\n  subgraph Freestyle\n    fsrepo[(imported repo)]\n    subgraph VM[Freestyle VM]\n      vmrepo[(cloned repo)]\n    end\n  end\n  ghrepo -- server-side import --> fsrepo\n  fsrepo -- in-network clone --> vmrepo\n```",
+  "purpose": "informative",
+  "kind": "flow",
+  "markers": [
+    {
+      "id": "why-server-side",
+      "label": "Why the import runs server-side",
+      "sourcePath": "README.md",
+      "description": "Hosted trail authoring imports a user's GitHub repo into a fresh Freestyle Git repo server-side, so a Freestyle VM can clone it in-network. The user's GitHub token stays on the host — it authenticates the import and never enters the VM. Freestyle performs the GitHub fetch on its own network and hosts the result; the VM only ever talks to `git.freestyle.sh`.",
+      "snippet": { "kind": "slice", "startLine": 38, "endLine": 43, "focusLine": 38, "contextLines": 1 }
+    },
+    {
+      "id": "import-server-side",
+      "label": "Importing from Github to Freestyle",
+      "sourcePath": "README.md",
+      "description": "`freestyle.git.repos.create({ name, source: { url, rev } })` runs host-side and returns a `repoId`. Freestyle fetches the repo from github.com on its own network — the `url` embeds `x-access-token:${userToken}` so private repos resolve, and `rev` selects a branch/tag/sha (`null` → the repo's default branch). Each create consumes one of the plan's repository slots (Free 500 / Hobby 5,000 / Pro 50,000 repos), not a per-repo dollar charge — and teardown returns the slot.",
+      "snippet": { "kind": "slice", "startLine": 48, "endLine": 56, "focusLine": 50, "contextLines": 1 }
+    },
+    {
+      "id": "scoped-identity",
+      "label": "Access within Freestyle",
+      "sourcePath": "README.md",
+      "description": "The host mints a scoped identity with `freestyle.identities.create()`, grants it `read` on just this `repoId` via `ident.permissions.git.grant(...)`, and issues a clone token with `ident.tokens.create()`. The VM receives only this `gitToken`, never the user's GitHub credentials. Identities and tokens are not separately billed.",
+      "snippet": { "kind": "slice", "startLine": 58, "endLine": 62, "focusLine": 59, "contextLines": 1 }
+    },
+    {
+      "id": "clone-in-vm",
+      "label": "The Freestyle VM clones in-network",
+      "sourcePath": "README.md",
+      "description": "Inside the Freestyle VM, `git clone --depth 1 https://x-access-token:${gitToken}@git.freestyle.sh/${repoId} /work` pulls the repo in-network from Freestyle Git. The VM reaches only `git.freestyle.sh` with the scoped token — it never touches github.com. The VM is where usage is billed — by vCPU, memory, and storage held per hour — so a short clone-and-run keeps cost low.",
+      "snippet": { "kind": "slice", "startLine": 64, "endLine": 66, "focusLine": 65, "contextLines": 1 }
+    },
+    {
+      "id": "teardown",
+      "label": "Tear down everything provisioned",
+      "sourcePath": "README.md",
+      "description": "Once the agent has run and the result is published on the host, the integration deletes everything it provisioned: `freestyle.vms.delete({ vmId })`, `freestyle.identities.delete({ identityId })`, and `freestyle.git.repos.delete({ repoId })`. Deleting the VM stops its hourly meter and deleting the repo frees its plan slot, so an abandoned session leaves nothing accruing cost.",
+      "snippet": { "kind": "slice", "startLine": 68, "endLine": 72, "focusLine": 69, "contextLines": 1 }
+    },
+    {
+      "id": "cost-model",
+      "label": "What a session costs",
+      "sourcePath": "docs/PRICING.md",
+      "description": "Of the three resources a session provisions, only the VM is metered: vCPU at $0.04032/hr, memory at $0.0129/GiB-hr, storage at $0.000086/GiB-hr, billed for as long as the VM is alive. The imported repo counts against the plan's repo cap (Free 500 / Hobby 5,000 / Pro 50,000) rather than a per-repo fee, and identities/tokens are not separately billed — so session cost scales with VM time, not repo count. Figures are a 2026-06-16 snapshot of `freestyle.sh/pricing`.",
+      "snippet": { "kind": "slice", "startLine": 24, "endLine": 33, "focusLine": 28, "contextLines": 1 }
+    }
+  ],
+  "views": [
+    {
+      "kind": "sequence",
+      "actors": [
+        { "name": "github", "label": "GitHub" },
+        { "name": "freestyle-git", "label": "Freestyle Git (hosted)" }
+      ],
+      "markers": [
+        { "markerId": "why-server-side", "name": "product.authoring.purpose", "participant": "product" },
+        { "markerId": "import-server-side", "name": "product.authoring.import", "participant": "product", "moveEvent": true },
+        { "markerId": "scoped-identity", "name": "product.authoring.identity", "participant": "product", "moveEvent": true },
+        { "markerId": "clone-in-vm", "name": "vm.authoring.clone", "participant": "freestyle-vm" },
+        { "markerId": "teardown", "name": "product.authoring.teardown", "participant": "product", "moveEvent": true },
+        { "markerId": "cost-model", "name": "cost.session.estimate", "participant": "cost" }
+      ],
+      "edges": [
+        { "id": "e1", "fromEvent": "why-server-side", "toEvent": "import-server-side", "label": "import" },
+        { "id": "e2", "fromEvent": "import-server-side", "toEvent": "scoped-identity", "label": "mint token" },
+        { "id": "e3", "fromEvent": "scoped-identity", "toEvent": "clone-in-vm", "label": "clone in-VM" },
+        { "id": "e4", "fromEvent": "clone-in-vm", "toEvent": "teardown", "label": "tear down" },
+        { "id": "e5", "fromEvent": "teardown", "toEvent": "cost-model", "label": "what it costs" }
+      ],
+      "layout": { "laneOrder": ["product", "github", "freestyle-git", "freestyle-vm", "cost"] }
+    }
+  ],
+  "createdAt": "2026-06-16T00:00:00.000Z",
+  "updatedAt": "2026-06-16T00:00:00.000Z",
+  "repositoryPath": "/Users/griever/Developer/principal-ai/freestyle-integration"
+}
