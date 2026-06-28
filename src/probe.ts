@@ -30,7 +30,7 @@ import type { RepoSpec } from './repos.js';
 export interface ProbeResult {
   slug: string; // owner/repo
   rev: string | null;
-  expect: RepoSpec['expect'];
+  expectOk: boolean;
   note?: string;
   /** ms for `git.repos.create` to return a repoId. */
   createMs: number | null;
@@ -115,7 +115,7 @@ export async function probeRepo(
   const result: ProbeResult = {
     slug,
     rev: spec.rev,
-    expect: spec.expect,
+    expectOk: spec.expectOk,
     note: spec.note,
     createMs: null,
     repoId: null,

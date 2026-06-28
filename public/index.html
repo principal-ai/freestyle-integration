@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Freestyle harness</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --fg:#e6e8ee; --mut:#8b93a7; --ok:#3fb950; --bad:#f85149; --accent:#4493f8; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  header { padding:16px 22px; border-bottom:1px solid var(--line); }
+  header h1 { margin:0; font-size:16px; font-weight:600; }
+  header p { margin:4px 0 0; color:var(--mut); font-size:12px; }
+  main { display:grid; grid-template-columns: 380px 1fr; gap:18px; padding:18px 22px; align-items:start; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  .panel h2 { margin:0 0 12px; font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--mut); }
+  label { display:block; font-size:12px; color:var(--mut); margin:10px 0 4px; }
+  select, input[type=text], input[type=number] { width:100%; background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; }
+  .row { display:flex; gap:8px; align-items:center; }
+  .row > * { flex:1; }
+  .row.tight > * { flex:none; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:6px; padding:8px 13px; font:inherit; font-weight:500; cursor:pointer; }
+  button.sec { background:#222733; color:var(--fg); border:1px solid var(--line); }
+  button:disabled { opacity:.5; cursor:default; }
+  .desc { font-size:12px; color:var(--mut); margin:8px 0 0; min-height:32px; }
+  ul.repos { list-style:none; margin:12px 0 0; padding:0; max-height:280px; overflow:auto; }
+  ul.repos li { display:flex; align-items:center; gap:8px; padding:6px 0; border-top:1px solid var(--line); font-size:13px; }
+  ul.repos li .slug { flex:1; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  ul.repos li .exp { font-size:11px; padding:1px 6px; border-radius:99px; border:1px solid var(--line); color:var(--mut); cursor:pointer; }
+  ul.repos li .exp.ok { color:var(--ok); border-color:#1c3a23; }
+  ul.repos li .exp.bad { color:var(--bad); border-color:#43211f; }
+  ul.repos li .play { color:var(--accent); cursor:pointer; padding:0 4px; font-size:11px; }
+  ul.repos li .play.dim { color:var(--line); cursor:default; }
+  ul.repos li .x { color:var(--mut); cursor:pointer; padding:0 4px; }
+  .muted { color:var(--mut); font-size:12px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; margin-top:10px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--mut); font-weight:500; font-size:11px; text-transform:uppercase; letter-spacing:.05em; }
+  td.slug { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .pill { font-size:11px; padding:1px 7px; border-radius:99px; }
+  .pill.ok { background:#102a17; color:var(--ok); }
+  .pill.bad { background:#2a1413; color:var(--bad); }
+  .pill.run { background:#10243a; color:var(--accent); }
+  .flag { color:var(--bad); font-weight:700; }
+  pre#log, pre#vmOut { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px; height:220px; overflow:auto; font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--mut); white-space:pre-wrap; margin-top:14px; }
+  .bar { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Freestyle harness</h1>
+  <p>Pick a use case, add the repos to exercise, and run. Repos live in your browser; save to file to persist on the server.</p>
+</header>
+
+<main>
+  <div class="panel" id="config">
+    <h2>Use case</h2>
+    <select id="useCase"></select>
+    <p class="desc" id="useCaseDesc"></p>
+
+    <h2 style="margin-top:18px">Repos</h2>
+    <div class="row">
+      <input type="text" id="repoInput" placeholder="owner/repo · owner/repo@rev · https://github.com/owner/repo" />
+    </div>
+    <div class="bar">
+      <button id="addRepo">Add repo</button>
+      <button class="sec" id="loadFile" title="Replace the list with repos.json on the server">Load from file</button>
+      <button class="sec" id="saveFile" title="Write the current list to repos.json on the server">Save to file</button>
+    </div>
+    <ul class="repos" id="repoList"></ul>
+    <p class="muted" id="repoCount"></p>
+
+    <h2 style="margin-top:18px">Run options</h2>
+    <div class="row tight">
+      <div style="flex:1"><label>window (s)</label><input type="number" id="windowSecs" value="45" min="5" /></div>
+      <div style="flex:1"><label>interval (s)</label><input type="number" id="intervalSecs" value="3" min="1" /></div>
+    </div>
+    <label class="row tight" style="margin-top:10px; gap:6px; align-items:center;">
+      <input type="checkbox" id="noTeardown" style="width:auto" /> <span>leave resources up (no teardown)</span>
+    </label>
+    <div class="bar">
+      <button id="run">Run all</button>
+      <span class="muted" style="align-self:center">or ▶ a single repo above</span>
+    </div>
+  </div>
+
+  <div class="panel" id="results">
+    <h2>Results</h2>
+    <table id="resultsTable">
+      <thead><tr><th></th><th>repo</th><th>rev</th><th>took</th><th>status</th><th>detail</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <pre id="log">Ready.</pre>
+  </div>
+
+  <div class="panel" id="console" style="grid-column:1 / -1">
+    <h2>Run command in VM</h2>
+    <p class="muted">Boots a VM, clones the selected repo once, and runs commands against <code>/repo</code> — e.g. inspect what an import resolved to (<code>git rev-parse HEAD</code>, <code>git log --oneline -5</code>, <code>git branch --show-current</code>). The VM stays warm until you stop it.</p>
+    <div class="row" style="margin-top:12px">
+      <select id="vmRepo" style="flex:2"></select>
+      <input type="text" id="vmCommand" style="flex:3" value="git log --oneline -5" placeholder="command to run in /repo" />
+      <button id="vmRun" style="flex:none">Run command in VM</button>
+      <button class="sec" id="vmStop" style="flex:none" disabled>Stop VM</button>
+    </div>
+    <p class="muted" id="vmStatus">No VM open.</p>
+    <pre id="vmOut">—</pre>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const LS_KEY = 'fh.repos';
+
+let repos = load();
+function load() {
+  try { return JSON.parse(localStorage.getItem(LS_KEY)) || []; } catch { return []; }
+}
+function persist() { localStorage.setItem(LS_KEY, JSON.stringify(repos)); render(); }
+
+// Accepts owner/repo, owner/repo@rev, a github.com URL, or a /tree/<branch> URL.
+function parseSlug(token) {
+  let t = token.trim()
+    .replace(/^(https?:\/\/)?(www\.)?github\.com\//i, '')
+    .replace(/\.git$/i, '');
+  const tree = t.match(/^([^/]+)\/([^/]+)\/(?:tree|blob)\/(.+)$/);
+  if (tree) return { owner: tree[1], repo: tree[2], rev: decodeURIComponent(tree[3]), expectOk: true };
+  let rev = null;
+  if (t.includes('@')) { const p = t.split('@'); t = p[0]; rev = p[1] || null; }
+  const [owner, repo] = t.replace(/\/+$/, '').split('/');
+  if (!owner || !repo) throw new Error('expected owner/repo, owner/repo@rev, or a github.com URL');
+  return { owner, repo, rev: rev || null, expectOk: true };
+}
+
+function render() {
+  const ul = $('repoList');
+  ul.innerHTML = '';
+  repos.forEach((r, i) => {
+    const li = document.createElement('li');
+    const play = document.createElement('span');
+    play.className = 'play' + (running ? ' dim' : '');
+    play.textContent = '▶'; play.title = 'run just this repo';
+    play.onclick = () => runRepos([repos[i]], { clear: false });
+    const slug = document.createElement('span');
+    slug.className = 'slug';
+    slug.textContent = `${r.owner}/${r.repo}${r.rev ? '@' + r.rev : ''}`;
+    const exp = document.createElement('span');
+    exp.className = 'exp ' + (r.expectOk ? 'ok' : 'bad');
+    exp.textContent = r.expectOk ? 'expect ok' : 'expect fail';
+    exp.title = 'click to toggle expected outcome';
+    exp.onclick = () => { repos[i].expectOk = !repos[i].expectOk; persist(); };
+    const x = document.createElement('span');
+    x.className = 'x'; x.textContent = '✕'; x.title = 'remove';
+    x.onclick = () => { repos.splice(i, 1); persist(); };
+    li.append(play, slug, exp, x);
+    ul.append(li);
+  });
+  $('repoCount').textContent = `${repos.length} repo(s) — stored in this browser`;
+  populateVmRepos();
+}
+
+$('addRepo').onclick = () => {
+  try {
+    const r = parseSlug($('repoInput').value);
+    if (repos.some(x => x.owner === r.owner && x.repo === r.repo && x.rev === r.rev)) {
+      log(`already in list: ${r.owner}/${r.repo}`); return;
+    }
+    repos.push(r); $('repoInput').value = ''; persist();
+  } catch (e) { log('! ' + e.message); }
+};
+$('repoInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('addRepo').click(); });
+
+$('saveFile').onclick = async () => {
+  const res = await fetch('/api/repos', { method:'PUT', headers:{'content-type':'application/json'}, body: JSON.stringify(repos) });
+  const j = await res.json();
+  log(j.ok ? `saved ${j.count} repos → ${j.file}` : '! save failed: ' + j.error);
+};
+$('loadFile').onclick = async () => {
+  const res = await fetch('/api/repos');
+  repos = await res.json(); persist();
+  log(`loaded ${repos.length} repos from repos.json`);
+};
+
+function log(line) {
+  const el = $('log');
+  if (el.textContent === 'Ready.') el.textContent = '';
+  el.textContent += line + '\n';
+  el.scrollTop = el.scrollHeight;
+}
+
+// --- use cases ---
+let useCases = [];
+async function loadUseCases() {
+  useCases = await (await fetch('/api/use-cases')).json();
+  const sel = $('useCase');
+  sel.innerHTML = '';
+  useCases.forEach(u => { const o = document.createElement('option'); o.value = u.id; o.textContent = u.label; sel.append(o); });
+  sel.onchange = showDesc; showDesc();
+}
+function showDesc() {
+  const u = useCases.find(x => x.id === $('useCase').value);
+  $('useCaseDesc').textContent = u ? u.description : '';
+}
+
+// --- run (SSE over fetch) — shared by "Run" (all) and per-row ▶ (one) ---
+let running = false;
+async function runRepos(list, { clear }) {
+  if (running) { log('! a run is already in progress'); return; }
+  if (!list.length) { log('! no repos to run'); return; }
+  running = true; render();
+  const btn = $('run'); btn.disabled = true; const oldLabel = btn.textContent; btn.textContent = 'Running…';
+  if (clear) { $('resultsTable').querySelector('tbody').innerHTML = ''; $('log').textContent = ''; }
+  const body = {
+    useCaseId: $('useCase').value,
+    repos: list,
+    windowSecs: Number($('windowSecs').value),
+    intervalSecs: Number($('intervalSecs').value),
+    noTeardown: $('noTeardown').checked,
+  };
+  try {
+    const res = await fetch('/api/run', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body) });
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream:true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const chunk = buf.slice(0, idx); buf = buf.slice(idx + 2);
+        handleEvent(chunk);
+      }
+    }
+  } catch (e) {
+    log('! ' + e.message);
+  } finally {
+    running = false; btn.disabled = false; btn.textContent = oldLabel; render();
+  }
+}
+$('run').onclick = () => runRepos(repos, { clear: true });
+
+function handleEvent(chunk) {
+  let event = 'message', data = '';
+  for (const line of chunk.split('\n')) {
+    if (line.startsWith('event:')) event = line.slice(6).trim();
+    else if (line.startsWith('data:')) data += line.slice(5).trim();
+  }
+  let payload = {}; try { payload = JSON.parse(data); } catch {}
+  if (event === 'log') log(payload.msg);
+  else if (event === 'start') log(`▶ ${payload.useCase} — ${payload.count} repo(s), window ${payload.windowSecs}s`);
+  else if (event === 'result') addResult(payload);
+  else if (event === 'done') log('✓ done');
+  else if (event === 'error') log('! ' + payload.message);
+}
+
+function addResult(r) {
+  const tb = $('resultsTable').querySelector('tbody');
+  const tr = document.createElement('tr');
+  const match = r.ok === r.expectOk;
+  const statusCls = r.ok ? 'ok' : 'bad';
+  tr.innerHTML =
+    `<td class="flag">${match ? '' : '!'}</td>` +
+    `<td class="slug">${r.slug}</td>` +
+    `<td>${r.rev || '(def)'}</td>` +
+    `<td>${r.durationMs != null ? r.durationMs + 'ms' : '—'}</td>` +
+    `<td><span class="pill ${statusCls}">${r.status}</span></td>` +
+    `<td>${escapeHtml(r.detail || '')}</td>`;
+  tb.append(tr);
+}
+function escapeHtml(s) { return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+// --- VM console (run ad-hoc commands against a warm VM) ---
+let vmSession = null;
+
+function populateVmRepos() {
+  const sel = $('vmRepo'); if (!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = '';
+  repos.forEach(r => {
+    const v = `${r.owner}/${r.repo}${r.rev ? '@' + r.rev : ''}`;
+    const o = document.createElement('option'); o.value = v; o.textContent = v; sel.append(o);
+  });
+  if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+  updateVmControls();
+}
+function updateVmControls() {
+  $('vmStop').disabled = !vmSession;
+  $('vmStatus').textContent = vmSession
+    ? `VM ${vmSession.vmId} open — ${vmSession.slug}${vmSession.rev ? '@' + vmSession.rev : ''}`
+    : 'No VM open.';
+}
+function vmOut(text) {
+  const el = $('vmOut');
+  if (el.textContent === '—') el.textContent = '';
+  el.textContent += text;
+  el.scrollTop = el.scrollHeight;
+}
+async function ensureSession(spec) {
+  const slug = `${spec.owner}/${spec.repo}`;
+  const rev = spec.rev || null;
+  if (vmSession && vmSession.slug === slug && (vmSession.rev || null) === rev) return;
+  if (vmSession) await stopVm();           // different repo → swap VMs
+  vmOut(`booting VM + cloning ${slug}${rev ? '@' + rev : ''} …\n`);
+  const res = await fetch('/api/vm/open', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(spec) });
+  const j = await res.json();
+  if (!j.ok) { vmOut(`! open failed: ${j.error}${j.stderr ? '\n' + j.stderr : ''}\n`); throw new Error(j.error); }
+  vmSession = { sessionId: j.sessionId, vmId: j.vmId, slug: j.slug, rev: j.rev };
+  vmOut(`VM ${j.vmId} ready.\n`);
+  updateVmControls();
+}
+async function stopVm() {
+  if (!vmSession) return;
+  const cur = vmSession;
+  await fetch('/api/vm/close', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ sessionId: cur.sessionId }) }).catch(()=>{});
+  vmOut(`(stopped VM ${cur.vmId})\n`);
+  vmSession = null; updateVmControls();
+}
+$('vmRun').onclick = async () => {
+  let spec; try { spec = parseSlug($('vmRepo').value || ''); } catch { vmOut('! pick a repo first\n'); return; }
+  const cmd = $('vmCommand').value.trim();
+  if (!cmd) { vmOut('! enter a command\n'); return; }
+  const btn = $('vmRun'); btn.disabled = true; const old = btn.textContent; btn.textContent = 'Running…';
+  try {
+    await ensureSession(spec);
+    const res = await fetch('/api/vm/exec', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ sessionId: vmSession.sessionId, command: cmd }) });
+    const j = await res.json();
+    if (!j.ok) { vmOut(`! ${j.error}\n`); }
+    else {
+      let s = `$ ${cmd}\n`;
+      if (j.stdout) s += j.stdout.replace(/\n$/, '') + '\n';
+      if (j.stderr) s += '[stderr] ' + j.stderr.replace(/\n$/, '') + '\n';
+      s += `(exit ${j.exitCode}, ${j.durationMs}ms)\n`;
+      vmOut(s);
+    }
+  } catch { /* open failure already shown */ }
+  finally { btn.disabled = false; btn.textContent = old; }
+};
+$('vmStop').onclick = stopVm;
+$('vmCommand').addEventListener('keydown', e => { if (e.key === 'Enter') $('vmRun').click(); });
+
+render();
+loadUseCases();
+</script>
+</body>
+</html>
