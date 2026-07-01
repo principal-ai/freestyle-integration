@@ -29,14 +29,23 @@ const CHECK_COMMAND =
 /**
  * The `git clone` command for a repo. Token is embedded host-side so private
  * repos clone (and public repos dodge the rate limit); shared by the probe and
- * the interactive VM console so they pull repos the same way. Shallow (depth 1
- * at the given rev) — enough to inspect what the import resolved to.
+ * the interactive VM console so they pull repos the same way.
+ *
+ * Shallow by default (`--depth 1` at the given rev) — enough to inspect what the
+ * import resolved to, or to count lines at HEAD. Pass `{ fullHistory: true }`
+ * for a complete clone: `git blame` needs the full commit history (and the
+ * historical blobs), so the coverage sweep can't run against a shallow clone.
  */
-export function cloneCommand(spec: RepoSpec, githubToken: string | undefined): string {
+export function cloneCommand(
+  spec: RepoSpec,
+  githubToken: string | undefined,
+  opts: { fullHistory?: boolean } = {}
+): string {
   const auth = githubToken ? `x-access-token:${githubToken}@` : '';
   const url = `https://${auth}github.com/${spec.owner}/${spec.repo}.git`;
   const branchArg = spec.rev ? `--branch ${spec.rev} ` : '';
-  return `git clone --depth 1 ${branchArg}${url} /repo`;
+  const depthArg = opts.fullHistory ? '' : '--depth 1 ';
+  return `git clone ${depthArg}${branchArg}${url} /repo`;
 }
 
 /** Pull a trace id / message off a thrown Freestyle SDK error. */

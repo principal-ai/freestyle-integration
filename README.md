@@ -1,111 +1,116 @@
-# Creating trails on a VM using Freestyle.sh
+# Repo git analysis on Freestyle VMs
 
-## How we use it
+## What this does
 
-Our product ("hosted trail authoring") imports a user's GitHub repo into a
-Freestyle Git repo. We then run an agent on a Freestyle VM so it can read files and make a trail.
+We need two pieces of data for a GitHub repo to drive web-ade's File City map:
 
+- **A contributor ownership map** — which contributor owns how many lines of
+  which file (`git blame` at HEAD). web-ade highlights a contributor's coverage
+  from this.
+- **Per-file line counts** — the newline count of every tracked text file.
+  web-ade turns these into 3D building heights.
+
+This repo produces both by **cloning the repo onto a Freestyle VM and running a
+git sweep inside it**, then reading structured JSON back. The output mirrors the
+electron-app's `GitService.getOwnershipMap` and
+`GitRepositoryService.countLinesInRepository` shape-for-shape, so it drops into
+web-ade's existing rendering with no translation layer.
 
 ```ts
 import { freestyle } from 'freestyle'; // reads FREESTYLE_API_KEY
 
-// 1. Import the GitHub repo into Freestyle Git
-const { repoId } = await freestyle.git.repos.create({
-  name: `authoring-${owner}-${repo}`,
-  source: {
-    url: `https://x-access-token:${userToken}@github.com/${owner}/${repo}.git`,
-  },
-});
+// 1. Boot a throwaway VM and clone the repo onto it (token embedded host-side).
+const { vm, vmId } = await freestyle.vms.create({ persistence: { type: 'ephemeral' } });
+await vm.exec({ command: `git clone https://github.com/${owner}/${repo}.git /repo` });
 
-// 2. Create Identity.
-const { identityId } = await freestyle.identities.create();
-const ident = freestyle.identities.ref({ identityId });
-await ident.permissions.git.grant({ repoId, permission: 'read' });
-const { token: gitToken } = await ident.tokens.create();
+// 2. Run the WHOLE sweep in one exec — it prints aggregated JSON to stdout.
+const { stdout } = await vm.exec({ command: 'python3 /tmp/sweep.py /repo' });
+const ownershipMap = JSON.parse(stdout); // { byEmail, totalLines, contributors, ... }
 
-// 3. Clone in-VM from git.freestyle.sh/{repoId}:
-//    git clone --depth 1 https://x-access-token:${gitToken}@git.freestyle.sh/${repoId} /work
-
-// 4. Run the agent, publish on the host, then tear everything down.
-await freestyle.vms.delete({ vmId });
-await freestyle.identities.delete({ identityId });
-await freestyle.git.repos.delete({ repoId });
+// 3. Tear the VM down regardless of outcome.
+await vm.delete({ vmId });
 ```
 
-We use Freestyle's documented source-import call shape
-([docs.freestyle.sh/git/repositories](https://www.freestyle.sh/docs/git/repositories)):
-a `.git` URL and the documented `rev` field — nothing beyond the documented
-surface.
+### Why a VM clone, not Freestyle Git import
 
-```js
-await freestyle.git.repos.create({
-  source: { url: "https://github.com/user/repo.git", rev: "main" },
-});
-```
+Freestyle has a separate **Git import** product (`git.repos.create({ source })`)
+that pulls a GitHub repo into a hosted Freestyle Git server. We do **not** use it:
+it returns `INTERNAL_ERROR` on some repos and never populates (see below). The
+same repos `git clone` cleanly onto a VM — verified on `anomalyco/opencode@dev`
+and `pingdotgg/t3code`, both of which fail the import path. The VM path also
+needs no hosted-repo lifecycle: clone, analyze, return JSON, discard.
 
-`create({ source })` returns a `repoId` immediately; population is asynchronous
-on Freestyle's side. We treat `git.repos.ref({ repoId }).branches.list()`
-succeeding as the readiness signal — it's the same state a VM clone depends on:
-while it errors, a clone of `git.freestyle.sh/{repoId}` returns HTTP 500. The
-in-VM clone runs with a retry/backoff (8 attempts, 4s apart) to ride out the
-import-vs-clone race.
+The import-failure repro still lives here (the `git-import` use case) as evidence
+for the Freestyle bug, but it is not part of the integration.
 
-## Resource lifecycle
+### The key design: one sweep per VM, not one exec per file
 
-Each authoring session creates three Freestyle resources — a **git repo**, an
-**identity**, and a **VM** — and is responsible for tearing all three down (step
-4). Teardown must run on every exit path, including failures, or the resources
-leak. Note that `git.repos.create({ source })` counts the repo from the moment
-the call starts server-side, so a create that throws or times out before
-returning a `repoId` can leave a repo with no handle to delete.
+Every `vm.exec()` is a network round-trip to Freestyle. The electron-app runs one
+`git blame` per file via an in-process git API — fine locally, but replaying that
+over `vm.exec` would be thousands of round-trips and gigabytes of raw blame
+output. Instead, each use case pushes **one** script into the VM that does the
+whole sweep against local disk and prints **aggregated** JSON. One round-trip,
+KB–MB of output. This is the load-bearing decision in `git-coverage.ts` and
+`git-linecount.ts`.
 
-## Known import limitations
+## The use cases
 
-Some imports never populate: `create({ source })` returns a `repoId`, but
-`branches.list()` on it returns `INTERNAL_ERROR` and a clone of
-`git.freestyle.sh/{repoId}` returns HTTP 500 — indefinitely, not a race. We
-don't have a model for *why* a given repo fails, so we track it empirically as a
-known-good / known-bad list.
+Both the CLI (`repro.ts`) and the browser UI run a *use case* over a list of
+repos, report pass/fail per repo, and tear down whatever they created. Adding one
+in `src/use-cases.ts` surfaces it in both with no extra wiring.
 
-| import path | result |
-|---|---|
-| `source` git import (**what authoring uses**) | works for most repos; fails for some (see below) |
-| `tar` URL import (codeload & api.github, ±`dir`) | fails for every repo tried, including small ones |
-| `zip` URL import (codeload) | fails for every repo tried, including small ones |
-| `files` inline import | works |
-| empty `create` | works |
+**Integration data (the point of this repo):**
 
-Repos we've exercised on the `source` path:
+- **`git-coverage`** — full clone + in-VM `git blame` sweep → the **ownership
+  map**: `byEmail` (email → file → lines), `totalLines`, `totalLinesGlobal`, and
+  the `contributors` list. Mirrors `getOwnershipMap`. Needs full history (blame
+  can't run against a shallow clone). Written to
+  `results/coverage-<owner>-<repo>.json`.
+- **`git-linecount`** — shallow clone + in-VM line-count sweep → `{ lineCounts,
+  fileCount }`, the exact body the app PUTs to the web-ade line-counts cache.
+  Mirrors `countLinesInRepository` (same binary-extension skip, 1 MB cap, and
+  newline rule). Shallow is enough — line counts read the working tree at HEAD.
+  Written to `results/linecount-<owner>-<repo>.json`.
 
-- **Imports cleanly:** `sindresorhus/yocto-queue`, `expressjs/express`,
-  `pierrecomputer/pierre`, `facebook/react`,
-  `principal-ai/alexandria-core-library`, `principal-ai/strategy-planning`.
-- **Fails to populate:** `anomalyco/opencode` (default branch `dev`),
-  `pingdotgg/t3code`.
+**Probes (Freestyle building blocks / bug repro):**
 
-## The harness
-
-Two ways to drive the same probes — a **browser UI** and a **CLI**. Both run a
-*use case* over a list of repos, report a pass/fail per repo, and tear down
-whatever they created.
-
-Use cases (`src/use-cases.ts`):
-
+- **`vm-bash`** — boot a VM, `git clone` the repo, run a bash command via
+  `vm.exec()`. The minimal "a VM can shell out against a cloned repo" check.
 - **`git-import`** — the production import path: `git.repos.create({ source })`
-  → poll `branches.list()` until it populates. This is the one that **reproduces
-  the import failures above**.
-- **`vm-bash`** — boot a Freestyle VM, `git clone` the repo into it, and run a
-  bash command via `vm.exec()`. Verifies the building block behind a curl-able
-  `/<owner>/<repo>/bash` endpoint: a VM can shell out against a cloned repo and
-  return stdout.
+  → poll `branches.list()` until it populates. **Reproduces the import failures**
+  described above; not part of the integration.
 
-Each use case follows the same create → use → teardown shape, so adding one in
-`src/use-cases.ts` surfaces it in both the UI and the CLI with no extra wiring.
+### Output shapes
 
-### UI — spin it up to run the test cases (recommended)
+`git-coverage` → `OwnershipMap` (see `src/git-coverage.ts`):
 
-The fastest way to **recreate the issues** is the local UI — pick a use case,
-add the repos to exercise, and run, no CLI or docs needed:
+```ts
+{
+  byEmail: Record<email, Record<path, linesOwned>>;  // contributor coverage
+  totalLines: Record<path, number>;                  // blamed lines per file
+  totalLinesGlobal: number;
+  contributors: Array<{ name: string; commits: number; email: string }>;
+}
+```
+
+`git-linecount` → `LineCountMap` (see `src/git-linecount.ts`):
+
+```ts
+{
+  lineCounts: Record<path, number>;  // newline count per tracked text file
+  fileCount: number;
+}
+```
+
+> **Heights vs ownership use different counts.** `git-linecount`'s newline count
+> is the true file line count (verified: yocto-queue `index.js` = 90). The
+> `totalLines` in `git-coverage` is a `git blame` total and runs ~10% lower, so
+> use `git-linecount` for any height or "% of file" math, and `git-coverage`
+> only for *who* owns *which* files.
+
+## Running it
+
+### UI (recommended)
 
 ```sh
 cp .env.example .env   # add FREESTYLE_API_KEY (+ GITHUB_TOKEN for private repos)
@@ -113,45 +118,77 @@ npm install
 npm run serve          # → http://localhost:4799
 ```
 
-Then in the browser:
-
-- Pick a **use case** (Git source import / VM bash exec).
-- **Add repos** — paste `owner/repo`, `owner/repo@rev`, or a full GitHub URL
-  (`https://github.com/owner/repo`, incl. `/tree/<branch>`). The list lives in
-  your browser (localStorage); **Save to file** persists it to `repos.json`.
-- **Run all**, or ▶ a single repo. Logs stream live and each result row shows
-  status, timing, and trace id. A `!` flags any outcome that contradicts the
-  expectation set for that repo.
-- **Recreate the import failure:** select *Git source import*, add
-  `anomalyco/opencode@dev` or `pingdotgg/t3code`, and run — you'll get
-  `INTERNAL_ERROR` with a fresh trace id, while a clean repo populates in the
-  same table for contrast.
-- **Run command in VM:** open a warm VM for a repo and run ad-hoc commands
-  against `/repo` (e.g. `git rev-parse HEAD`, `git log --oneline -5`) to inspect
-  what an import/clone actually resolved to. Stop the VM when you're done.
+In the browser: pick a **use case**, **add repos** (`owner/repo`,
+`owner/repo@rev`, or a GitHub URL), and **Run all** or ▶ a single repo. Logs
+stream live; each result row shows status, timing, and trace id. The repo list
+lives in your browser (localStorage); **Save to file** persists it to
+`repos.json`.
 
 ### CLI
 
-The same probes, headless — good for scripting and as a regression guard: it
-exits non-zero if any observed outcome contradicts the expectation in
-`src/repos.ts`.
-
 ```sh
-npm run repro                                       # git-import, default repo set
-npm run repro -- --use-case vm-bash                 # the VM bash-exec probe
-npm run repro -- --repo anomalyco/opencode@dev      # one repo (optional @rev or URL)
-npm run repro -- --window 60 --json results/run.json
+npm run repro -- --use-case git-coverage  --repo expressjs/express --window 300
+npm run repro -- --use-case git-linecount --repo expressjs/express --window 120
+npm run repro -- --use-case git-import    --repo anomalyco/opencode@dev   # bug repro
+npm run repro                                                             # git-import, default set
 ```
 
 Flags: `--use-case <id>`, `--repo owner/repo[@rev]` (repeatable; GitHub URLs
-accepted), `--window <secs>` / `--interval <secs>` (readiness poll),
-`--no-teardown`, `--json <path>`.
+accepted), `--window <secs>` / `--interval <secs>`, `--no-teardown`,
+`--json <path>`. The CLI exits non-zero if any observed outcome contradicts the
+expectation in `src/repos.ts`, so it doubles as a regression guard.
 
-### Layout
+Reads `FREESTYLE_API_KEY` (required) and `GITHUB_TOKEN` (optional, for private
+repos / to dodge the anonymous rate limit) from `.env`.
+
+## Known import limitations (the `git-import` path)
+
+Some imports never populate: `create({ source })` returns a `repoId`, but
+`branches.list()` returns `INTERNAL_ERROR` and a clone of
+`git.freestyle.sh/{repoId}` returns HTTP 500 indefinitely. Tracked empirically
+as a known-good / known-bad list.
+
+| import path | result |
+|---|---|
+| `source` git import | works for most repos; fails for some (below) |
+| `tar` URL import (codeload & api.github, ±`dir`) | fails for every repo tried |
+| `zip` URL import (codeload) | fails for every repo tried |
+| `files` inline import | works |
+| empty `create` | works |
+
+- **Imports cleanly:** `sindresorhus/yocto-queue`, `expressjs/express`,
+  `pierrecomputer/pierre`, `facebook/react`,
+  `principal-ai/alexandria-core-library`, `principal-ai/strategy-planning`.
+- **Fails to populate:** `anomalyco/opencode` (default branch `dev`),
+  `pingdotgg/t3code`. **Both clone cleanly on a VM** — which is why the
+  integration uses the VM path.
+
+### Orphaned repos / billing note
+
+Two things we observed while exercising the import path, worth flagging to the
+Freestyle team:
+
+- **A never-populated import may not delete cleanly.** For a repo stuck on
+  `INTERNAL_ERROR`, `git.repos.delete()` can report success while the repo stays
+  invisible to `git.repos.list()` — an orphan that may still count as active.
+- **A create that times out can orphan a repo with no handle.**
+  `git.repos.create({ source })` counts the repo server-side from the moment the
+  call starts, so a create that throws or times out *before* returning a
+  `repoId` (seen on very large repos like `elastic/kibana`) can leave a repo
+  there's no id to delete.
+
+## Layout
 
 - `src/repos.ts` — the default repo set + expected outcome per repo.
-- `src/use-cases.ts` — the use-case registry (`git-import`, `vm-bash`).
+- `src/use-cases.ts` — the use-case registry (`git-coverage`, `git-linecount`,
+  `vm-bash`, `git-import`, `git-coverage-fs`).
+- `src/git-coverage.ts` — full clone → in-VM blame sweep → ownership map.
+- `src/git-linecount.ts` — shallow clone → in-VM line-count sweep → line counts.
+- `src/git-freestyle.ts` — import into Freestyle Git → token → VM clone from
+  `git.freestyle.sh` → the same blame sweep. See
+  [docs/git-coverage-fs.md](docs/git-coverage-fs.md) for what it tests and found.
+- `src/vm-bash.ts` — VM create → clone → exec → teardown (+ shared `cloneCommand`).
 - `src/probe.ts` — the git-import create → poll → teardown probe.
-- `src/vm-bash.ts` — the VM create → clone → exec → teardown probe.
 - `src/repro.ts` — CLI: runs a use case over the repo list; table + `--json`.
 - `src/server.ts` + `public/index.html` — the browser UI.
+- `results/` — per-repo output JSON from the coverage / line-count sweeps.
