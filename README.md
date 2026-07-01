@@ -11,10 +11,7 @@ We need two pieces of data for a GitHub repo to drive web-ade's File City map:
   web-ade turns these into 3D building heights.
 
 This repo produces both by **running a git sweep on a Freestyle VM** — one script
-that sweeps local disk and prints aggregated JSON, mirroring the electron-app's
-`GitService.getOwnershipMap` and `GitRepositoryService.countLinesInRepository`
-shape-for-shape, so it drops into web-ade's existing rendering with no
-translation layer.
+that sweeps local disk and prints the aggregated result as JSON.
 
 The open question is **how the repo should get onto that VM**. Freestyle gives us
 two routes — its hosted Git import, and a direct clone — and this repo exercises
@@ -133,10 +130,10 @@ Freestyle-native flow as the import issues get fixed.
 
 ## The key design: one sweep per VM, not one exec per file
 
-Every `vm.exec()` is a network round-trip to Freestyle. The electron-app runs one
-`git blame` per file via an in-process git API — fine locally, but replaying that
-over `vm.exec` would be thousands of round-trips and gigabytes of raw blame
-output. Instead, each use case pushes **one** script into the VM that does the
+Every `vm.exec()` is a network round-trip to Freestyle. Running one `git blame`
+per file would be the obvious port and the wrong one: thousands of round-trips
+and gigabytes of raw blame output crossing the wire. Instead, each use case
+pushes **one** script into the VM that does the
 whole sweep against local disk and prints **aggregated** JSON. One round-trip,
 KB–MB of output. This is the load-bearing decision in `git-coverage.ts` and
 `git-linecount.ts`.
@@ -151,13 +148,11 @@ in `src/use-cases.ts` surfaces it in both with no extra wiring.
 
 - **`git-coverage`** — full clone + in-VM `git blame` sweep → the **ownership
   map**: `byEmail` (email → file → lines), `totalLines`, `totalLinesGlobal`, and
-  the `contributors` list. Mirrors `getOwnershipMap`. Needs full history (blame
-  can't run against a shallow clone). Written to
-  `results/coverage-<owner>-<repo>.json`.
+  the `contributors` list. Needs full history (blame can't run against a shallow
+  clone). Written to `results/coverage-<owner>-<repo>.json`.
 - **`git-linecount`** — shallow clone + in-VM line-count sweep → `{ lineCounts,
-  fileCount }`, the exact body the app PUTs to the web-ade line-counts cache.
-  Mirrors `countLinesInRepository` (same binary-extension skip, 1 MB cap, and
-  newline rule). Shallow is enough — line counts read the working tree at HEAD.
+  fileCount }`: a newline count per tracked text file, skipping binaries and
+  files over 1 MB. Shallow is enough — line counts read the working tree at HEAD.
   Written to `results/linecount-<owner>-<repo>.json`.
 
 **The Freestyle-native path we want:**

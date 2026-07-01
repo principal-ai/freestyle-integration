@@ -4,11 +4,9 @@
  * `git blame` at HEAD. This is the data the web-ade File City map consumes to
  * highlight a contributor's coverage.
  *
- * It mirrors the electron-app's `GitService.getOwnershipMap` exactly — same
- * blame command, same binary-file filter, same `byEmail` shape — so the output
- * drops straight into web-ade's existing highlight-layer rendering with no
- * translation. web-ade owns the 3D city (`cityData`) and builds the
- * `HighlightLayer` on contributor select; the VM owns only the source map.
+ * The sweep aggregates blame by author email into a `byEmail` map (email → file
+ * → lines) plus a `totalLines` per file. The VM produces this source map; the
+ * consumer owns the rendering.
  *
  *   1. `vms.create()` — a throwaway VM.
  *   2. `vm.exec(git clone …)` — FULL history (blame needs it; not `--depth 1`).
@@ -29,8 +27,8 @@ import type { RepoSpec } from './repos.js';
 import type { RunOptions, RunResult } from './use-cases.js';
 import { cloneCommand, describeError } from './vm-bash.js';
 
-/** The shape the sweep emits — identical to `getOwnershipMap`'s return, plus
- *  the contributor list (from `git shortlog`) so a consumer can label authors. */
+/** The shape the sweep emits — the ownership map plus a contributor list (from
+ *  `git shortlog`) so a consumer can label authors. */
 export interface OwnershipMap {
   /** email → { repo-relative path → lines that email owns at HEAD }. */
   byEmail: Record<string, Record<string, number>>;
@@ -45,8 +43,8 @@ export interface OwnershipMap {
 /**
  * The in-VM sweep. Pure stdlib Python (git + python3 are on the VM) so it ships
  * as one file and needs no deps. Reads a repo path, prints an `OwnershipMap` as
- * JSON to stdout. The blame command, binary filter (empty-tree numstat), and
- * `author-mail` aggregation match `GitService.getOwnershipMap` line for line.
+ * JSON to stdout via `git blame --line-porcelain`, an empty-tree numstat to skip
+ * binaries, and `author-mail` aggregation by email.
  */
 const SWEEP_PY = String.raw`
 import json, subprocess, sys, re
@@ -93,8 +91,8 @@ by_email = {}
 total_lines = {}
 total_global = 0
 
-# Concurrency is now in-VM against local disk (the GIL is released across the
-# subprocess wait), so this is where the app's 8-way blame speed comes from.
+# Concurrency is in-VM against local disk (the GIL is released across the
+# subprocess wait), so blame runs 8-way in parallel.
 with ThreadPoolExecutor(max_workers=8) as ex:
     for f, counts, n in ex.map(blame, files):
         if not counts or n <= 0:
@@ -135,7 +133,7 @@ export function coverageSweepCommand(): string {
   );
 }
 
-/** Where the full ownership map lands for inspection / hand-off to web-ade. */
+/** Where the full ownership map lands for inspection / hand-off. */
 function outputPath(spec: RepoSpec): string {
   return path.resolve('results', `coverage-${spec.owner}-${spec.repo}.json`);
 }

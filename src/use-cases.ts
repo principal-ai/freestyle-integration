@@ -122,8 +122,8 @@ const gitCoverage: UseCase = {
   description:
     'Boot a Freestyle VM, full-clone the repo, and run a single in-VM git blame ' +
     'sweep that emits the ownership map (email → file → lines) — the data the ' +
-    'web-ade File City map consumes to highlight a contributor. Mirrors the ' +
-    "electron-app's getOwnershipMap; the full map is written to results/.",
+    'web-ade File City map consumes to highlight a contributor. Full map ' +
+    'written to results/.',
   run: coverageProbe,
 };
 
@@ -134,9 +134,8 @@ const gitLineCount: UseCase = {
   description:
     'Boot a Freestyle VM, shallow-clone the repo, and count lines in every ' +
     'tracked text file in one in-VM sweep — the metric the web-ade File City ' +
-    'map turns into 3D building heights. Mirrors the electron-app\'s ' +
-    'countLinesInRepository; emits the { lineCounts, fileCount } shape the app ' +
-    'PUTs to the web-ade line-counts cache. Full map written to results/.',
+    'map turns into 3D building heights. Emits the { lineCounts, fileCount } ' +
+    'shape; full map written to results/.',
   run: lineCountProbe,
 };
 

@@ -4,12 +4,9 @@
  * heights. This is a different, cheaper number than the blame ownership map
  * (`git-coverage`): a raw newline count, not a blame total.
  *
- * It mirrors the electron-app's `GitRepositoryService.countLinesInRepository`
- * exactly — same `git ls-files` enumeration, same binary-extension skip, same
- * 1 MB cap, same `countLinesInContent` rule (newlines, +1 when the file doesn't
- * end in one) — so the output matches web-ade's line-counts cache byte-for-byte.
- * The emitted `{ lineCounts, fileCount }` is the exact body the app already PUTs
- * to `https://app.principal-ade.com/api/line-counts/{owner}/{repo}`.
+ * The rules: `git ls-files` enumeration, skip binary extensions, skip files over
+ * 1 MB, and count newlines (+1 when the file doesn't end in one). The emitted
+ * `{ lineCounts, fileCount }` is a plain per-file line-count map.
  *
  *   1. `vms.create()` — a throwaway VM.
  *   2. `vm.exec(git clone --depth 1 …)` — SHALLOW; line counts read the working
@@ -28,8 +25,7 @@ import type { RepoSpec } from './repos.js';
 import type { RunOptions, RunResult } from './use-cases.js';
 import { cloneCommand, describeError } from './vm-bash.js';
 
-/** The shape the sweep emits — the exact body the electron-app PUTs to the
- *  web-ade line-counts cache. */
+/** The shape the sweep emits — a per-file line-count map. */
 export interface LineCountMap {
   /** repo-relative path → line count (newlines, +1 when no trailing newline). */
   lineCounts: Record<string, number>;
@@ -38,17 +34,16 @@ export interface LineCountMap {
 }
 
 /**
- * The in-VM sweep. Pure stdlib Python (git + python3 are on the VM). Mirrors
- * `countLinesInRepository` + `countLinesInContent`: the binary-extension set,
- * the 1 MB cap, and the newline rule are copied from the app so the counts are
- * identical to what the desktop app caches.
+ * The in-VM sweep. Pure stdlib Python (git + python3 are on the VM). Enumerates
+ * tracked files, skips the binary-extension set and files over 1 MB, and counts
+ * newlines (+1 when there's no trailing newline).
  */
 const SWEEP_PY = String.raw`
 import json, os, subprocess, sys
 
 repo = sys.argv[1] if len(sys.argv) > 1 else "/repo"
 
-# Copied verbatim from GitRepositoryService.BINARY_EXTENSIONS.
+# Binary extensions to skip — a byte count isn't a meaningful line count.
 BINARY = {
     "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "svg",
     "mp3", "mp4", "wav", "avi", "mov", "webm", "ogg",
@@ -68,12 +63,11 @@ def git(args):
 files = [f for f in git(["ls-files"]).stdout.split("\n") if f]
 
 def is_binary(p):
-    # Mirrors filePath.split('.').pop()?.toLowerCase(): the last dot-segment
-    # (the whole name when there's no dot).
+    # The last dot-segment, lowercased (the whole name when there's no dot).
     return p.split(".")[-1].lower() in BINARY
 
 def count_lines(content):
-    # Mirrors countLinesInContent: newline total, +1 when no trailing newline.
+    # Newline total, +1 when there's no trailing newline.
     if not content:
         return 0
     newlines = content.count("\n")
@@ -91,7 +85,7 @@ for f in files:
         with open(full, "r", encoding="utf-8", errors="replace") as fh:
             content = fh.read()
     except OSError:
-        # Deleted or unreadable — skip, matching the app's try/catch.
+        # Deleted or unreadable — skip.
         continue
     line_counts[f] = count_lines(content)
 
@@ -107,7 +101,7 @@ function sweepCommand(): string {
   );
 }
 
-/** Where the full line-count map lands for inspection / hand-off to web-ade. */
+/** Where the full line-count map lands for inspection / hand-off. */
 function outputPath(spec: RepoSpec): string {
   return path.resolve('results', `linecount-${spec.owner}-${spec.repo}.json`);
 }
