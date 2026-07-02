@@ -71,19 +71,23 @@ Two conclusions:
     the [`git-import`](../src/probe.ts) probe reproduces. The ownership map is
     blocked at step 1 and never reaches the VM. (This repo *does* clone directly
     from GitHub, which is why the integration uses the VM-clone path.)
-  - `ladybird` and `kibana` are **client-side `fetch failed`** transport
+  - `ladybird` and `kibana` were **client-side `fetch failed`** transport
     timeouts on the two giant repos — undici's default header/connect timeouts,
-    which neither this harness nor the SDK overrides (same caveat noted in
-    `probe.ts`). `ladybird` timed out holding the `vm.exec` clone connection
-    open; `kibana` timed out on the import-create call before returning a
-    `repoId`. These are *our-side* limits, not the `INTERNAL_ERROR` bug.
+    which neither this harness nor the SDK overrides. `ladybird` timed out holding
+    the `vm.exec` clone connection open; `kibana` timed out on the import-create
+    call before returning a `repoId`. These are *our-side* limits, not the
+    `INTERNAL_ERROR` bug — **and the clone case is now fixed** (see Caveats).
 
 ## Caveats
 
-- **Large repos need a longer client fetch timeout.** The `fetch failed` results
-  above are undici defaults giving up on a long-running request, not a Freestyle
-  error. Raising the fetch timeout (or streaming/polling the clone instead of
-  holding one `vm.exec` open) is the fix, and lives on our side.
+- **Large clones are fixed via the long-running pattern.** The `ladybird`
+  `fetch failed` came from holding one long `vm.exec()` open. Following
+  Freestyle's documented pattern — launch the clone as a transient `systemd-run`
+  unit and poll a marker file with short calls (`execLong` in `src/vm-bash.ts`) —
+  the full-history clone now completes (exit 0). It also requires a **persistent**
+  VM: a long job can suspend mid-run, and an ephemeral VM loses its disk on
+  suspend, wiping `/repo` before the sweep. (`kibana`'s failure is different — the
+  import-*create* API call itself timed out, which the pattern doesn't cover.)
 - **A create that times out can orphan a repo.** `git.repos.create({ source })`
   counts the repo server-side from the moment the call starts, so `kibana`'s
   timed-out create may have left a Freestyle Git repo that's invisible to

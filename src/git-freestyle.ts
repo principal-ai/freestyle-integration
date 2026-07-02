@@ -29,7 +29,7 @@ import path from 'node:path';
 import { freestyle } from 'freestyle';
 import type { RepoSpec } from './repos.js';
 import type { RunOptions, RunResult } from './use-cases.js';
-import { describeError } from './vm-bash.js';
+import { describeError, execLong } from './vm-bash.js';
 import { coverageSweepCommand, type OwnershipMap } from './git-coverage.js';
 
 /** Where the full ownership map lands — `-fs-` marks the Freestyle-Git variant
@@ -121,7 +121,6 @@ export async function coverageFreestyleProbe(
     error: null,
   };
 
-  const timeoutMs = opts.windowSecs * 1000;
   const tStart = Date.now();
   const ids: { repoId: string | null; identityId: string | null } = {
     repoId: null,
@@ -139,25 +138,36 @@ export async function coverageFreestyleProbe(
     // 3. Create a throwaway VM and clone from Freestyle Git.
     const created = await freestyle.vms.create({
       name: `covfs-${spec.owner}-${spec.repo}-${tStart}`,
-      persistence: { type: 'ephemeral' },
-      idleTimeoutSeconds: 120,
+      // Persistent (NOT ephemeral): a long detached clone/sweep can suspend
+      // mid-run, and an ephemeral VM loses its disk on suspend ("VM files have
+      // been deleted"). Persistent files survive; we tear down in `finally`.
+      persistence: { type: 'persistent' },
+      idleTimeoutSeconds: null,
     });
     vm = created.vm;
     vmId = created.vmId;
     opts.onLog(`${slug}: VM ${vmId} created — cloning from Freestyle Git (full history)…`);
 
-    const clone = await vm.exec({ command: cloneCmd, timeoutMs });
-    if ((clone.statusCode ?? 1) !== 0) {
+    // Long-running clone/sweep: detached unit + short marker polls, so a large
+    // full-history clone doesn't hold one vm.exec open past the fetch timeout.
+    const clone = await execLong(vm, 'clone', cloneCmd, {
+      windowSecs: opts.windowSecs,
+      onLog: (m) => opts.onLog(`${slug}: ${m}`),
+    });
+    if (clone.statusCode !== 0) {
       result.status = 'clone failed';
-      result.detail = `exit ${clone.statusCode} — ${(clone.stderr ?? '').trim().slice(0, 120)}`;
+      result.detail = `exit ${clone.statusCode} — ${clone.stderr.trim().slice(0, 120)}`;
       opts.onLog(`${slug}: Freestyle-Git clone FAILED (exit ${clone.statusCode})`);
       return result;
     }
     opts.onLog(`${slug}: cloned — running blame sweep…`);
 
-    // Run the shared ownership sweep in one exec, read JSON back.
-    const sweep = await vm.exec({ command: coverageSweepCommand(), timeoutMs });
-    if ((sweep.statusCode ?? 1) !== 0) {
+    // Run the shared ownership sweep, read JSON back.
+    const sweep = await execLong(vm, 'coverage-sweep', coverageSweepCommand(), {
+      windowSecs: opts.windowSecs,
+      onLog: (m) => opts.onLog(`${slug}: ${m}`),
+    });
+    if (sweep.statusCode !== 0) {
       result.status = 'sweep failed';
       result.detail = `exit ${sweep.statusCode} — ${(sweep.stderr ?? '').trim().slice(0, 120)}`;
       opts.onLog(`${slug}: sweep FAILED (exit ${sweep.statusCode})`);

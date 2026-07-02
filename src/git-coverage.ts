@@ -25,7 +25,7 @@ import path from 'node:path';
 import { freestyle } from 'freestyle';
 import type { RepoSpec } from './repos.js';
 import type { RunOptions, RunResult } from './use-cases.js';
-import { cloneCommand, describeError } from './vm-bash.js';
+import { cloneCommand, describeError, execLong } from './vm-bash.js';
 
 /** The shape the sweep emits — the ownership map plus a contributor list (from
  *  `git shortlog`) so a consumer can label authors. */
@@ -157,7 +157,6 @@ export async function coverageProbe(
 
   // Full history — blame can't run against a shallow clone.
   const cloneCmd = cloneCommand(spec, opts.githubToken, { fullHistory: true });
-  const timeoutMs = opts.windowSecs * 1000;
 
   const tStart = Date.now();
   let vmId: string | null = null;
@@ -167,26 +166,39 @@ export async function coverageProbe(
     // 1. Create a throwaway VM.
     const created = await freestyle.vms.create({
       name: `gitcov-${spec.owner}-${spec.repo}-${tStart}`,
-      persistence: { type: 'ephemeral' },
-      idleTimeoutSeconds: 120,
+      // Persistent (NOT ephemeral): the clone/sweep run as detached units, and if
+      // the VM suspends mid-run an ephemeral VM loses its disk ("VM files have
+      // been deleted") — the /repo we just cloned vanishes before the sweep can
+      // read it. Persistent files survive a suspend/resume. idleTimeoutSeconds:
+      // null avoids idle-suspend churn; we always tear down in `finally`.
+      persistence: { type: 'persistent' },
+      idleTimeoutSeconds: null,
     });
     vm = created.vm;
     vmId = created.vmId;
     opts.onLog(`${slug}: VM ${vmId} created — cloning (full history)…`);
 
-    // 2. Clone the repo onto the VM.
-    const clone = await vm.exec({ command: cloneCmd, timeoutMs });
-    if ((clone.statusCode ?? 1) !== 0) {
+    // 2. Clone the repo onto the VM. A full-history clone of a large repo can
+    //    run for minutes, so use the long-running pattern (detached unit + short
+    //    marker polls) instead of one long vm.exec that hits the fetch timeout.
+    const clone = await execLong(vm, 'clone', cloneCmd, {
+      windowSecs: opts.windowSecs,
+      onLog: (m) => opts.onLog(`${slug}: ${m}`),
+    });
+    if (clone.statusCode !== 0) {
       result.status = 'clone failed';
-      result.detail = `exit ${clone.statusCode} — ${(clone.stderr ?? '').trim().slice(0, 120)}`;
+      result.detail = `exit ${clone.statusCode} — ${clone.stderr.trim().slice(0, 120)}`;
       opts.onLog(`${slug}: clone FAILED (exit ${clone.statusCode})`);
       return result;
     }
     opts.onLog(`${slug}: cloned — running blame sweep…`);
 
-    // 3. Run the whole ownership sweep in one exec, read JSON back.
-    const sweep = await vm.exec({ command: coverageSweepCommand(), timeoutMs });
-    if ((sweep.statusCode ?? 1) !== 0) {
+    // 3. Run the whole ownership sweep (also long on big repos), read JSON back.
+    const sweep = await execLong(vm, 'coverage-sweep', coverageSweepCommand(), {
+      windowSecs: opts.windowSecs,
+      onLog: (m) => opts.onLog(`${slug}: ${m}`),
+    });
+    if (sweep.statusCode !== 0) {
       result.status = 'sweep failed';
       result.detail = `exit ${sweep.statusCode} — ${(sweep.stderr ?? '').trim().slice(0, 120)}`;
       opts.onLog(`${slug}: sweep FAILED (exit ${sweep.statusCode})`);

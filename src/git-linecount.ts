@@ -23,7 +23,7 @@ import path from 'node:path';
 import { freestyle } from 'freestyle';
 import type { RepoSpec } from './repos.js';
 import type { RunOptions, RunResult } from './use-cases.js';
-import { cloneCommand, describeError } from './vm-bash.js';
+import { cloneCommand, describeError, execLong } from './vm-bash.js';
 
 /** The shape the sweep emits — a per-file line-count map. */
 export interface LineCountMap {
@@ -125,7 +125,6 @@ export async function lineCountProbe(
 
   // Shallow is enough — line counts read the working tree at HEAD.
   const cloneCmd = cloneCommand(spec, opts.githubToken);
-  const timeoutMs = opts.windowSecs * 1000;
 
   const tStart = Date.now();
   let vmId: string | null = null;
@@ -135,26 +134,36 @@ export async function lineCountProbe(
     // 1. Create a throwaway VM.
     const created = await freestyle.vms.create({
       name: `gitlc-${spec.owner}-${spec.repo}-${tStart}`,
-      persistence: { type: 'ephemeral' },
-      idleTimeoutSeconds: 120,
+      // Persistent (NOT ephemeral): a long detached clone/sweep can suspend
+      // mid-run, and an ephemeral VM loses its disk on suspend ("VM files have
+      // been deleted"). Persistent files survive; we tear down in `finally`.
+      persistence: { type: 'persistent' },
+      idleTimeoutSeconds: null,
     });
     vm = created.vm;
     vmId = created.vmId;
     opts.onLog(`${slug}: VM ${vmId} created — cloning…`);
 
-    // 2. Clone the repo onto the VM (shallow).
-    const clone = await vm.exec({ command: cloneCmd, timeoutMs });
-    if ((clone.statusCode ?? 1) !== 0) {
+    // 2. Clone the repo onto the VM (shallow). Long-running pattern (detached
+    //    unit + short marker polls) keeps a big shallow tree from timing out.
+    const clone = await execLong(vm, 'clone', cloneCmd, {
+      windowSecs: opts.windowSecs,
+      onLog: (m) => opts.onLog(`${slug}: ${m}`),
+    });
+    if (clone.statusCode !== 0) {
       result.status = 'clone failed';
-      result.detail = `exit ${clone.statusCode} — ${(clone.stderr ?? '').trim().slice(0, 120)}`;
+      result.detail = `exit ${clone.statusCode} — ${clone.stderr.trim().slice(0, 120)}`;
       opts.onLog(`${slug}: clone FAILED (exit ${clone.statusCode})`);
       return result;
     }
     opts.onLog(`${slug}: cloned — counting lines…`);
 
-    // 3. Count every tracked text file in one exec, read JSON back.
-    const sweep = await vm.exec({ command: sweepCommand(), timeoutMs });
-    if ((sweep.statusCode ?? 1) !== 0) {
+    // 3. Count every tracked text file, read JSON back.
+    const sweep = await execLong(vm, 'linecount-sweep', sweepCommand(), {
+      windowSecs: opts.windowSecs,
+      onLog: (m) => opts.onLog(`${slug}: ${m}`),
+    });
+    if (sweep.statusCode !== 0) {
       result.status = 'count failed';
       result.detail = `exit ${sweep.statusCode} — ${(sweep.stderr ?? '').trim().slice(0, 120)}`;
       opts.onLog(`${slug}: count FAILED (exit ${sweep.statusCode})`);

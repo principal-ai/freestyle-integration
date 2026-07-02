@@ -81,12 +81,20 @@ step:
   that then failed at clone — the readiness signal may fire before objects finish
   importing.
 
-**Step 3 — VM clone from `git.freestyle.sh`**
+**Step 3 — VM clone (large repos)** — *resolved on our side*
 
-- **Large clones hit client-side timeouts.** `ladybird` cloned past the client
-  fetch timeout (undici defaults, which the SDK doesn't override) and failed with
-  `fetch failed`. This is a client-side limit, addressable on our side — not an
-  `INTERNAL_ERROR`.
+- **Large clones used to hit client-side timeouts.** Holding one long `vm.exec()`
+  open for a big clone (`ladybird`) hit undici's default fetch timeout and failed
+  with `fetch failed`. Fixed by following Freestyle's documented long-running
+  pattern: launch the clone as a transient `systemd-run` unit and poll a marker
+  file with short calls (`execLong` in `src/vm-bash.ts`). The `ladybird`
+  full-history clone now completes (exit 0).
+- **Long jobs need a *persistent* VM, not ephemeral.** With the detached pattern a
+  long job can suspend mid-run; an **ephemeral** VM loses its disk on suspend
+  (`VM files have been deleted`), so the cloned `/repo` vanishes before the sweep.
+  Switching to `persistence: { type: 'persistent' }` fixed it. (A full-history
+  blame of a repo as large as `ladybird` is still just slow — >30 min — but that's
+  compute time, not an infra failure.)
 
 **Step 4 — teardown**
 
@@ -117,16 +125,41 @@ the repo directly from GitHub onto the VM** — same sweep, same output, no
 hosted-repo lifecycle to manage:
 
 ```ts
-// Boot a throwaway VM, clone straight from GitHub, sweep, discard.
-const { vm, vmId } = await freestyle.vms.create({ persistence: { type: 'ephemeral' } });
-await vm.exec({ command: `git clone https://github.com/${owner}/${repo}.git /repo` });
-const { stdout } = await vm.exec({ command: 'python3 /tmp/sweep.py /repo' });
-await vm.delete({ vmId });
+// Boot a VM, clone straight from GitHub, sweep, discard. Persistent (not
+// ephemeral) so a long clone/sweep survives a mid-run suspend; the long clone
+// runs via the systemd-unit + marker-poll pattern (see Step 3).
+const { vm, vmId } = await freestyle.vms.create({
+  persistence: { type: 'persistent' },
+  idleTimeoutSeconds: null,
+});
+await execLong(vm, 'clone', `git clone https://github.com/${owner}/${repo}.git /repo`, { windowSecs });
+const { stdout } = (await execLong(vm, 'sweep', 'python3 /tmp/sweep.py /repo', { windowSecs }));
+await vm.delete();
 ```
 
 This is the `git-coverage` / `git-linecount` path: it sidesteps every step-1 issue
 above. The `git-coverage-fs` path stays in the repo so we can re-verify the
 Freestyle-native flow as the import issues get fixed.
+
+## Warm VMs: how we cache today
+
+The harness in this repo is deliberately throwaway — create → clone → sweep →
+delete — to keep each probe isolated. Our actual usage caches differently, and
+this is the context we'd like Freestyle's advice on:
+
+- **One VM per repo, kept *suspended*.** The first visit clones the repo onto a
+  VM; we then **suspend** it rather than delete it. A later visit **resumes** the
+  same VM with the repo already on disk — no re-clone. For a repo whose clone
+  takes minutes, that's the difference between instant and slow.
+- **The suspended VMs double as a visited registry** — the set of them *is* the
+  list of repos we've processed; there's no separate index.
+- **We clone directly from GitHub — we do not use Freestyle Git today.** The
+  `git-coverage-fs` path here is us evaluating whether routing through Freestyle
+  Git would be better.
+
+Suspend appears cheap and works well. The open question is whether a different
+Freestyle primitive — a per-repo **snapshot**, or fast cloning from Freestyle Git
+— would start faster or track state more cleanly (see *Open questions* below).
 
 ## The key design: one sweep per VM, not one exec per file
 
@@ -233,6 +266,33 @@ expectation in `src/repos.ts`, so it doubles as a regression guard.
 
 Reads `FREESTYLE_API_KEY` (required) and `GITHUB_TOKEN` (optional, for private
 repos / to dodge the anonymous rate limit) from `.env`.
+
+## Open questions for Freestyle
+
+Guidance welcome — some are gaps, some are "are we holding it right?"
+
+1. **Warm start: suspended VM vs snapshot vs Freestyle Git clone?** Today we keep
+   one **suspended VM per repo** so a revisit resumes with the repo already on
+   disk (no re-clone). Would a per-repo **VM snapshot** (`vm.snapshot()` →
+   `vms.create({ snapshotId })`) be a better warm cache? It looks like it would
+   give instant fresh VMs *and* parallel fan-out (many VMs from one image), which a
+   single suspended VM can't. How do the two compare on **start latency** and on
+   **cost** (a suspended VM's disk vs a snapshot's storage)?
+2. **Would cloning from Freestyle Git be materially faster than from GitHub?**
+   Enough to clone fresh on every VM and drop warm caches entirely? We haven't
+   measured `git clone git.freestyle.sh/<repoId>` against `git clone github.com/…`.
+3. **How do we know when a `create({ source })` import has finished?** We found no
+   documented status field, readiness endpoint, or completion webhook (the only
+   webhook is for pushes). We poll `branches.list()` as a proxy, but it reports
+   ready *early* on large repos (Step 1 readiness above). A real import-completion
+   signal would remove the guesswork.
+4. **Is the `systemd-run` + marker-file pattern the recommended way to run long
+   commands?** We adopted it (from your sandbox guides) after single long
+   `vm.exec()` calls hit client-side fetch timeouts on big clones. Is there a
+   native long-exec / streaming / poll API we should prefer?
+5. **Import reliability.** Some repos never populate (`INTERNAL_ERROR`), and a
+   `create` that times out before returning a `repoId` can orphan a repo we can't
+   delete. Known issues, or misuse of the API?
 
 ## Layout
 

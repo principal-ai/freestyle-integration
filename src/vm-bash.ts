@@ -48,6 +48,88 @@ export function cloneCommand(
   return `git clone ${depthArg}${branchArg}${url} /repo`;
 }
 
+const sleep = (ms: number): Promise<void> =>
+  new Promise((r) => setTimeout(r, ms));
+
+/** The live VM handle returned by `freestyle.vms.create()`. */
+export type VmHandle = Awaited<ReturnType<typeof freestyle.vms.create>>['vm'];
+
+export interface ExecLongResult {
+  statusCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+/**
+ * Run a shell command that may take minutes, following Freestyle's documented
+ * long-running-command pattern (docs: "Run Long Setup Steps Safely"): a single
+ * long `vm.exec()` holds one HTTP request open and hits the client-side fetch
+ * timeout (undici's defaults, which the SDK doesn't override) — the `fetch
+ * failed` we saw cloning large repos. Instead, launch the command detached as a
+ * transient systemd unit and make only SHORT polling calls against a marker
+ * file, so no single request runs long enough to time out.
+ *
+ * stdout/stderr/exit are captured to files in the VM and read back once the unit
+ * finishes. Returns the command's own exit code (the marker is always written,
+ * even on non-zero exit, so a failed command surfaces as `statusCode`, not a
+ * throw). Throws only if the unit dies without finishing or the budget elapses.
+ */
+export async function execLong(
+  vm: VmHandle,
+  name: string,
+  command: string,
+  opts: { windowSecs: number; pollIntervalMs?: number; onLog?: (msg: string) => void }
+): Promise<ExecLongResult> {
+  const unit = `job-${name}`;
+  const base = `/tmp/${name}`;
+  const done = `${base}.done`;
+  const out = `${base}.out`;
+  const err = `${base}.err`;
+  const exit = `${base}.exit`;
+  const scriptPath = `/root/${name}.sh`;
+
+  // Wrapper: run the command, capture streams + exit, then drop the marker LAST
+  // so its existence means "everything above is written".
+  const script =
+    `#!/bin/sh\n` +
+    `{ ${command} ; } > ${out} 2> ${err}\n` +
+    `echo $? > ${exit}\n` +
+    `touch ${done}\n`;
+  await vm.fs.writeTextFile(scriptPath, script);
+
+  // Launch detached — this call returns immediately.
+  await vm.exec(
+    `chmod +x ${scriptPath} && rm -f ${done} ${exit} && ` +
+      `systemd-run --unit=${unit} --collect /bin/sh ${scriptPath}`
+  );
+
+  const pollMs = opts.pollIntervalMs ?? 8000;
+  const deadline = Date.now() + opts.windowSecs * 1000;
+  let polls = 0;
+  while (Date.now() < deadline) {
+    await sleep(pollMs);
+    polls++;
+    const probe = await vm.exec(
+      `if test -f ${done}; then echo __DONE__; else ` +
+        `systemctl show ${unit} -p ActiveState -p Result --no-pager; fi`
+    );
+    const text = `${probe.stdout ?? ''}${probe.stderr ?? ''}`;
+    if (text.includes('__DONE__')) {
+      const code = (await vm.exec(`cat ${exit}`)).stdout ?? '1';
+      const stdout = await vm.fs.readTextFile(out).catch(() => '');
+      const stderr = await vm.fs.readTextFile(err).catch(() => '');
+      opts.onLog?.(`${name}: finished (exit ${code.trim()}, ${polls} polls)`);
+      return { statusCode: parseInt(code.trim(), 10) || 0, stdout, stderr };
+    }
+    // Unit vanished/failed without ever dropping the marker → it died mid-run.
+    if (/Result=(oom-kill|exit-code|signal|core-dump)/.test(text)) {
+      const stderr = await vm.fs.readTextFile(err).catch(() => '');
+      throw new Error(`${unit} died: ${text.trim().slice(0, 160)} ${stderr.slice(0, 160)}`.trim());
+    }
+  }
+  throw new Error(`${unit} did not finish within ${opts.windowSecs}s (${polls} polls)`);
+}
+
 /** Pull a trace id / message off a thrown Freestyle SDK error. */
 export function describeError(e: unknown): { message: string; traceId: string | null } {
   const err = e as {
